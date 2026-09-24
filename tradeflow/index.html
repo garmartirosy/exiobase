@@ -87,7 +87,7 @@ th, td { padding: 4px 20px 4px 8px; text-align: left; border-bottom: 1px solid #
   display: none;
   position: absolute;
   top: 14px;
-  right: 16px;
+  right: 52px;
   width: 28px;
   height: 28px;
   border: 4px solid #D1D5DB;
@@ -97,13 +97,36 @@ th, td { padding: 4px 20px 4px 8px; text-align: left; border-bottom: 1px solid #
 }
 .dark .schema-panel-spinner { border-color: #4B5563; border-top-color: #9CA3AF; }
 @keyframes schema-spin { to { transform: rotate(360deg); } }
+.schema-panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 14px 0;
+}
 .schema-panel h3 {
   font-size: 15px;
   font-weight: 600;
-  margin: 0 0 14px 0;
+  margin: 0;
   color: #111;
 }
 .dark .schema-panel h3 { color: #e5e7eb; }
+.schema-panel-menu-wrap { position: relative; }
+.schema-panel-menu-btn {
+  background: none;
+  border: none;
+  font-size: 18px;
+  font-weight: bold;
+  line-height: 1;
+  color: #6B7280;
+  cursor: pointer;
+  padding: 3px 7px;
+  border-radius: 4px;
+}
+.schema-panel-menu-btn:hover { background: #F3F4F6; }
+.dark .schema-panel-menu-btn { color: #9CA3AF; }
+.dark .schema-panel-menu-btn:hover { background: #374151; }
+.schema-panel-menu-wrap .schema-menu { top: 26px; left: auto; right: 0; }
 #schema-diagram {
   width: 100%;
   overflow-x: auto;
@@ -221,21 +244,36 @@ waitForLocalsiteJs();
   <div class="tradeflow-controls">
     <label for="tradeflowYear">Year:</label>
     <select id="tradeflowYear">
+      <option value="2024">2024</option>
+      <option value="2023">2023</option>
       <option value="2022">2022</option>
       <option value="2021">2021</option>
       <option value="2020">2020</option>
-      <option value="2019" selected>2019</option>
+      <option value="2019">2019</option>
+      <option value="2018">2018</option>
     </select>
+    <!-- Button looks good, but is not needed currently.
     <button class="btn-insert" id="btnInsertData">
       <span class="material-icons" style="font-size:16px">upload</span>
       Insert Data
     </button>
+    -->
+
   </div>
   <div class="insert-status" id="insertStatus"></div>
 
   <!-- Real-time schema diagram -->
   <div class="schema-panel">
-    <h3>Industry Database Schema</h3>
+    <div class="schema-panel-title-row">
+      <h3>Industry Database Schema</h3>
+      <div class="schema-panel-menu-wrap">
+        <button type="button" class="schema-panel-menu-btn" id="schemaPanelMenuBtn" title="Schema options" aria-label="Schema options">&#8943;</button>
+        <div class="schema-menu" id="schemaPanelMenu">
+          <a href="#" id="schemaMenuMyLayoutJson">My Layout JSON</a>
+          <a href="#" id="schemaMenuResetLayout">Reset Layout</a>
+        </div>
+      </div>
+    </div>
     <div class="schema-panel-spinner" id="schemaPanelSpinner" title="Loading live schema…"></div>
     <div id="schema-diagram">
       <div class="schema-loading" id="schemaLoading">Loading schema from Industry Database...</div>
@@ -247,23 +285,26 @@ waitForLocalsiteJs();
     </div>
     <div class="schema-source">
       <a href="#" id="schemaAboutToggle">About schema</a>
-      <a href="https://github.com/ModelEarth/trade-data/tree/main/year/2019" id="schemaSourceLink" target="_parent">Data source</a>
+      <a href="https://github.com/ModelEarth/trade-data/tree/main/year/2024" id="schemaSourceLink" target="_parent">Data source</a>
     </div>
   </div>
 
   <div class="schema-about-panel" id="schemaAboutPanel">
     <section>
-      <h4>Schema <a href="https://github.com/ModelEarth/team/blob/main/src/main.rs#L2108" target="_blank" rel="noopener noreferrer">View SQL Schema</a></h4>
-      <p>Six tables: <code>industry</code> and <code>factor</code> are shared reference tables (sector definitions, 721 environmental factors); <code>trade</code> and <code>trade_factor</code> hold international flows and their environmental coefficients per year/country/flow_type; <code>interstate</code> and <code>interstate_factor</code> hold US state-to-state (BEA) flows. Each table's box shows column names and types.</p>
+      <h4>Schema <a href="https://github.com/ModelEarth/team/blob/main/src/main.rs#L2108" target="_blank" rel="noopener noreferrer">View SQL Schema</a> <a href="/io/about/matrix/" target="_parent">Learn about IO Matrix</a></h4>
+      <p>Eight tables: <code>industry</code> and <code>factor</code> are shared reference tables (industry definitions, 721 environmental factors); <code>sector</code> and <code>sector_industry</code> map industries into the 21 BEA sector categories used by the interstate tables; <code>trade</code> and <code>trade_factor</code> hold international flows and their environmental coefficients per country/flow_type; <code>interstate</code> and <code>interstate_factor</code> hold US state-to-state (BEA) flows. Each database covers a single year, so these tables carry no year column. Each table's box shows column names and types.</p>
+      <p>A ninth table, <code>region</code>, supports loading more than one country into the same database: each country gets a small <code>block_index</code>, assigned the first time it's loaded, so <code>trade_id</code> stays unique across countries (not just within one country's own files) — see the <code>team</code> repo's <a href="https://github.com/ModelEarth/team/blob/main/PLAN-merge.md" target="_parent">PLAN-merge.md</a> for the full design. <code>trade.country</code> has a real foreign key to <code>region.country</code> — every region row is created before any trade row referencing that country is inserted. It's created automatically (<code>CREATE TABLE IF NOT EXISTS</code>) the next time trade data is loaded into a database, so it may not exist yet in a database that hasn't had a load run since this table was added — it's not backfilled by any separate migration step.</p>
       <p>The diagram's columns come from two sources: a hardcoded static schema (in this page's JS and mirrored in the Rust API) used as an instant preview, and the live database schema (queried from Postgres <code>information_schema.columns</code>) once the API responds. The two can drift out of sync — that's why a column can briefly appear then disappear (as happened with a leftover <code>id</code> column already removed from the live tables but not yet from the static fallbacks).</p>
     </section>
     <section>
       <h4>Indexes</h4>
       <p>Indexes aren't arbitrary — each one mirrors a real join or filter the app performs:</p>
       <ul>
-        <li><strong>Composite lookup indexes</strong> on <code>(trade_id, year, country, flow_type)</code> for <code>trade</code> and <code>trade_factor</code> — this is the exact compound key used to join those tables, since <code>trade_id</code> alone repeats across years/countries/flow types.</li>
-        <li><strong>Filter-column indexes</strong> on <code>year</code>, <code>country</code>, <code>region1</code>, <code>region2</code>, <code>flow_type</code> — these back the year/country selections made in this page's UI.</li>
-        <li><strong>Foreign-key indexes</strong> on <code>factor_id</code> and <code>interstate_id</code> — speed up joining fact tables back to their dimension tables (<code>factor</code>, <code>interstate</code>).</li>
+        <li><strong>Composite lookup indexes</strong> on <code>(trade_id, country, flow_type)</code> for <code>trade</code> and <code>trade_factor</code> — this is the exact compound key used to join those tables, since <code>trade_id</code> alone repeats across countries/flow types.</li>
+        <li><strong>Filter-column indexes</strong> on <code>country</code>, <code>region1</code>/<code>region2</code> (<code>trade</code>), <code>state1</code>/<code>state2</code> (<code>interstate</code> — US state codes, not Exiobase regions), and <code>flow_type</code> — these back the country/region/state/flow-type selections made in this page's UI (year selects which per-year database to query, not a column filter).</li>
+        <li><strong>Foreign-key indexes</strong> on <code>factor_id</code> (both <code>trade_factor</code> and <code>interstate_factor</code> → <code>factor</code>) and <code>interstate_id</code> (<code>interstate_factor</code> → <code>interstate</code>). <code>interstate</code> itself keeps <code>trade_id</code> — <code>interstate_id</code>'s embedded industry is only a broad category, not the <code>industry1</code>/<code>industry2</code> pair, so <code>trade_id</code> is the only path back to the originating international flow (its exact industry pair, <code>amount</code>, <code>country</code>, <code>flow_type</code>).</li>
+        <li><strong>Natural-key dedup constraints</strong>: <code>trade</code> on <code>(region1, region2, industry1, industry2)</code> — the true identity of a flow, so the same flow pulled from two different country-perspective CSV runs (e.g. "imports to US" and "exports from Canada" both capturing the same CA→US leg) collapses into one row instead of duplicating. <code>interstate</code> on <code>(state1, state2, industry1, industry2)</code> — including same-state (<code>state1 == state2</code>) rows, which represent genuine intrastate flow, not duplicates.</li>
+        <li><strong>No <code>bigserial id</code></strong> anywhere now: each table uses its natural key as the real <code>PRIMARY KEY</code> directly — <code>trade</code>: <code>region1, region2, industry1, industry2</code>; <code>trade_factor</code>: <code>trade_id, country, flow_type, factor_id</code>; <code>interstate</code>: <code>interstate_id</code> alone; <code>interstate_factor</code>: <code>(interstate_id, factor_id)</code>.</li>
       </ul>
     </section>
     <section>
@@ -281,7 +322,7 @@ waitForLocalsiteJs();
   'use strict';
 
   const RUST_API = 'http://localhost:8081/api';
-  const YEARS = ['2022','2021','2020','2019'];
+  const YEARS = ['2024','2023','2022','2021','2020','2019','2018'];
 
   // ---- Hash helpers ----
   function safeGetHash() {
@@ -316,9 +357,15 @@ waitForLocalsiteJs();
     schemaAboutPanel.classList.toggle('open');
   });
 
+  // Tracks which year's schema is currently loaded, so a hash change
+  // unrelated to tradeflowYear (e.g. country/geoview) doesn't trigger a
+  // redundant re-fetch of the same year's schema.
+  let loadedSchemaYear = null;
+
   yearSel.addEventListener('change', function () {
     safeGoHash({ tradeflowYear: this.value });
     updateSchemaSourceLink(this.value);
+    loadSchemaDiagram();
   });
 
   function syncYearFromHash() {
@@ -331,7 +378,13 @@ waitForLocalsiteJs();
   }
 
   // ---- Hash change listener ----
-  document.addEventListener('hashChangeEvent', syncYearFromHash);
+  // Each year has its own database (see PLAN.md), so navigating to
+  // a link like #tradeflowYear=2021 while this page is already open needs
+  // to re-fetch the live schema for that year, not just update the dropdown.
+  document.addEventListener('hashChangeEvent', function () {
+    syncYearFromHash();
+    if (yearSel.value !== loadedSchemaYear) loadSchemaDiagram();
+  });
   syncYearFromHash();
 
   // ---- CSV data link (resolves each table straight to its GitHub file) ----
@@ -343,6 +396,10 @@ waitForLocalsiteJs();
     switch (tableName) {
       case 'industry':
         return `year/${year}/industry.csv`;
+      case 'sector':
+        return `year/${year}/sector.csv`;
+      case 'sector_industry':
+        return `year/${year}/sector_industry.csv`;
       case 'factor':
         return `year/${year}/factor.csv`;
       case 'trade':
@@ -350,9 +407,14 @@ waitForLocalsiteJs();
       case 'trade_factor':
         return `year/${year}/${country}/${flowType}/trade_factor.csv`;
       case 'interstate':
-        return `year/${year}/US/domestic/bea_trade_detail.csv`;
+        return `year/${year}/US/domestic/interstate.csv`;
       case 'interstate_factor':
-        return `year/${year}/US/domestic/state_trade_flows.csv`;
+        return `year/${year}/US/domestic/interstate_factor.csv`;
+      case 'region':
+        // Not sourced from a published CSV at all — it's populated by the
+        // loader itself (see getStaticSchema()'s region comment), so there's
+        // no per-table file to link to; falls through to the year folder.
+        return `year/${year}`;
       default:
         return `year/${year}`;
     }
@@ -373,6 +435,9 @@ waitForLocalsiteJs();
   }
 
   // ---- Insert Data button ----
+  // Button looks good, but is not needed currently. Commented out along
+  // with the HTML button above; uncomment both to re-enable.
+  /*
   const btnInsert = document.getElementById('btnInsertData');
   const status   = document.getElementById('insertStatus');
 
@@ -420,6 +485,7 @@ waitForLocalsiteJs();
       showStatus('Request failed: ' + err.message + ' — Is the Rust API running on port 8081?', 'error');
     });
   });
+  */
 
   // ---- Schema diagram ----
   // Live row counts (and the three-dot menu) are added once this resolves,
@@ -427,7 +493,9 @@ waitForLocalsiteJs();
   function loadSchemaDiagram() {
     const spinner = document.getElementById('schemaPanelSpinner');
     if (spinner) spinner.style.display = 'block';
-    fetch(RUST_API + '/db/industry-schema')
+    const year = yearSel.value;
+    loadedSchemaYear = year;
+    fetch(RUST_API + '/db/industry-schema?year=' + encodeURIComponent(year))
       .then(r => r.json())
       .then(data => renderSchemaDiagram(data))
       .catch(() => renderSchemaDiagram(null))
@@ -475,19 +543,28 @@ waitForLocalsiteJs();
     g.appendChild(menuGroup);
   }
 
+  // Default layout positions for each table box. To publish a saved
+  // arrangement for other users, paste "My Layout JSON" (from the schema
+  // panel's ⋮ menu) over this object.
+  const DEFAULT_LAYOUT = {"industry":{"x":37,"y":136},"sector":{"x":36,"y":417},"sector_industry":{"x":34,"y":278},"factor":{"x":777,"y":215},"trade":{"x":299,"y":5},"trade_factor":{"x":557,"y":20},"interstate":{"x":299,"y":338},"interstate_factor":{"x":557,"y":399},"region":{"x":35,"y":7}}
+
+  function getSavedLayout() {
+    const layout = JSON.parse(JSON.stringify(DEFAULT_LAYOUT));
+    try {
+      const saved = JSON.parse(localStorage.getItem('industry-schema-positions') || 'null');
+      if (saved) Object.keys(layout).forEach(k => { if (saved[k]) layout[k] = saved[k]; });
+    } catch(e) {}
+    return layout;
+  }
+
   function renderSchemaDiagram(data, deferExtras) {
     document.getElementById('schemaLoading').style.display = 'none';
     const svg = document.getElementById('schema-svg');
     svg.style.display = '';
     svg.innerHTML = '';
 
-    // Mutable layout positions for each table box
-    const layout = {"industry":{"x":22,"y":243},"factor":{"x":791,"y":240},"trade":{"x":260,"y":5},"trade_factor":{"x":541,"y":7},"interstate":{"x":270,"y":337},"interstate_factor":{"x":531,"y":343}}
-
-    try {
-      const saved = JSON.parse(localStorage.getItem('industry-schema-positions') || 'null');
-      if (saved) Object.keys(layout).forEach(k => { if (saved[k]) layout[k] = saved[k]; });
-    } catch(e) {}
+    // Mutable layout positions for each table box (current drag positions).
+    const layout = getSavedLayout();
 
     const BOX_W = 190, BOX_H_BASE = 28, ROW_H = 18;
     const tables = (data && data.tables) ? data.tables : {};
@@ -497,12 +574,15 @@ waitForLocalsiteJs();
     // Relationships: [from, to, label]
     const rels = [
       ['trade',           'industry',          'industry1/2'],
-      ['trade_factor',    'trade',             'trade_id+year+country+flow_type'],
+      ['trade',           'region',            'country'],
+      ['trade_factor',    'trade',             'trade_id+country+flow_type'],
       ['trade_factor',    'factor',            'factor_id'],
-      ['interstate',      'industry',          'industry1/2'],
+      ['interstate',      'sector',            'sector1/2'],
       ['interstate',      'trade',             'trade_id (US domestic)'],
       ['interstate_factor','interstate',       'interstate_id'],
       ['interstate_factor','factor',           'factor_id'],
+      ['sector_industry',  'sector',            'sector_id'],
+      ['sector_industry',  'industry',          'industry_id (many-to-many)'],
     ];
 
     // Compute box heights
@@ -721,7 +801,11 @@ waitForLocalsiteJs();
       if (!drag) return;
       drag = null;
       svg.style.cursor = '';
-      try { localStorage.setItem('industry-schema-positions', JSON.stringify(layout)); } catch(e) {}
+      try {
+        localStorage.setItem('industry-schema-positions', JSON.stringify(layout));
+      } catch (e) {
+        console.warn('Could not save table position to localStorage (drag will not persist):', e);
+      }
     }
 
     // Clean up listeners from any previous render
@@ -764,11 +848,22 @@ waitForLocalsiteJs();
   function getStaticSchema() {
     return {
       industry: [{name:'industry_id',type:'varchar(10)'},{name:'name',type:'text'},{name:'category',type:'varchar(100)'}],
-      factor:   [{name:'factor_id',type:'integer'},{name:'unit',type:'varchar(50)'},{name:'stressor',type:'text'},{name:'extension',type:'varchar(100)'}],
-      trade:    [{name:'trade_id',type:'integer'},{name:'year',type:'smallint'},{name:'region1',type:'varchar(10)'},{name:'region2',type:'varchar(10)'},{name:'industry1',type:'varchar(10)'},{name:'industry2',type:'varchar(10)'},{name:'amount',type:'numeric'},{name:'flow_type',type:'varchar(10)'},{name:'country',type:'varchar(10)'}],
-      trade_factor: [{name:'trade_id',type:'integer'},{name:'year',type:'smallint'},{name:'country',type:'varchar(10)'},{name:'flow_type',type:'varchar(10)'},{name:'factor_id',type:'integer'},{name:'coefficient',type:'numeric'},{name:'level',type:'numeric'}],
-      interstate: [{name:'interstate_id',type:'varchar(80)'},{name:'trade_id',type:'integer'},{name:'year',type:'smallint'},{name:'region1',type:'varchar(10)'},{name:'region2',type:'varchar(10)'},{name:'industry1',type:'varchar(10)'},{name:'industry2',type:'varchar(10)'},{name:'state_industry_code',type:'varchar(30)'},{name:'amount',type:'numeric'},{name:'commodity_code',type:'varchar(30)'},{name:'industry_code',type:'varchar(30)'},{name:'economic_multiplier',type:'numeric'}],
-      interstate_factor: [{name:'interstate_id',type:'varchar(80)'},{name:'factor_id',type:'integer'},{name:'level',type:'numeric'}]
+      sector: [{name:'sector_id',type:'varchar(10)'},{name:'name',type:'text'}],
+      sector_industry: [{name:'sector_id',type:'varchar(10)'},{name:'industry_id',type:'varchar(10)'},{name:'weight',type:'numeric'}],
+      factor:   [{name:'factor_id',type:'smallint'},{name:'unit',type:'varchar(50)'},{name:'stressor',type:'text'},{name:'extension',type:'varchar(100)'}],
+      trade:    [{name:'trade_id',type:'integer'},{name:'region1',type:'varchar(10)'},{name:'region2',type:'varchar(10)'},{name:'industry1',type:'varchar(10)'},{name:'industry2',type:'varchar(10)'},{name:'amount',type:'numeric'},{name:'flow_type',type:'varchar(20)'},{name:'country',type:'varchar(10)'}],
+      trade_factor: [{name:'trade_id',type:'integer'},{name:'country',type:'varchar(10)'},{name:'flow_type',type:'varchar(20)'},{name:'factor_id',type:'smallint'},{name:'coefficient',type:'numeric'},{name:'level',type:'numeric'}],
+      interstate: [{name:'interstate_id',type:'varchar(80)'},{name:'trade_id',type:'integer'},{name:'state1',type:'varchar(10)'},{name:'state2',type:'varchar(10)'},{name:'sector1',type:'varchar(10)'},{name:'sector2',type:'varchar(10)'},{name:'state_industry_code',type:'varchar(30)'},{name:'amount',type:'numeric'},{name:'commodity_code',type:'varchar(30)'},{name:'industry_code',type:'varchar(30)'},{name:'economic_multiplier',type:'numeric'}],
+      interstate_factor: [{name:'interstate_id',type:'varchar(80)'},{name:'factor_id',type:'smallint'},{name:'level',type:'numeric'},{name:'flow_type',type:'varchar(20)'}],
+      // region tracks the small per-country trade_id block assignment used
+      // to keep trade_id unique across countries within one database — see
+      // the team repo's PLAN-merge.md "Fix design: per-country trade_id
+      // blocks" section. trade.country -> region.country is a real FK
+      // (added below in the relationship list) — every region row is
+      // created before any trade row referencing that country is inserted.
+      // name is nullable: only comprehensive mode's full-49-region seed
+      // supplies a display name — see team repo's PLAN-comprehensive.md.
+      region: [{name:'country',type:'varchar(10)'},{name:'block_index',type:'smallint'},{name:'name',type:'varchar(100)'}]
     };
   }
 
@@ -779,6 +874,108 @@ waitForLocalsiteJs();
     renderSchemaDiagram(null, true);
     loadSchemaDiagram();
   });
+
+  // Reads only this browser's saved drag positions (localStorage) — null if
+  // nothing has been dragged here yet, as opposed to getSavedLayout() which
+  // fills gaps from DEFAULT_LAYOUT.
+  function getMySessionLayout() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('industry-schema-positions') || 'null');
+      return (saved && typeof saved === 'object') ? saved : null;
+    } catch (e) {
+      console.warn('Could not read industry-schema-positions from localStorage:', e);
+      return null;
+    }
+  }
+
+  // Some browsers (Safari in particular, and most browsers in private
+  // browsing) block localStorage for pages opened directly via file:// —
+  // dragging then silently fails to persist. Feature-detect so the export
+  // menu can tell that case apart from "nothing dragged yet".
+  function localStorageWorks() {
+    try {
+      const k = '__schema_ls_test__';
+      localStorage.setItem(k, '1');
+      const ok = localStorage.getItem(k) === '1';
+      localStorage.removeItem(k);
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // ---- Schema panel ⋮ menu: export this browser's table layout as JSON ----
+  function setupSchemaPanelMenu() {
+    const menuBtn   = document.getElementById('schemaPanelMenuBtn');
+    const menu      = document.getElementById('schemaPanelMenu');
+    const copyLink  = document.getElementById('schemaMenuMyLayoutJson');
+    const resetLink = document.getElementById('schemaMenuResetLayout');
+    if (!menuBtn || !menu || !copyLink || !resetLink) return;
+
+    menuBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
+    });
+
+    document.addEventListener('click', e => {
+      if (menu.style.display === 'block' && !menu.contains(e.target) && e.target !== menuBtn) {
+        menu.style.display = 'none';
+      }
+    });
+
+    copyLink.addEventListener('click', e => {
+      e.preventDefault();
+      menu.style.display = 'none';
+      const storageOk = localStorageWorks();
+      const mySaved = storageOk ? getMySessionLayout() : null;
+      const json = JSON.stringify(mySaved || getSavedLayout());
+      const where = 'the "const DEFAULT_LAYOUT = {...}" line in exiobase/tradeflow/index.html '
+        + '(inside the <script> near renderSchemaDiagram)';
+      const note = mySaved
+        ? ''
+        : !storageOk
+          ? '\n\n(This browser is blocking local storage for this page — common when opening the '
+            + 'file directly via file://, or in private/incognito mode — so dragged positions can\'t '
+            + 'be saved here. Try running the page from a local server instead.)'
+          : '\n\n(You haven\'t dragged any tables in this browser yet, '
+            + 'so this is still the file\'s default layout.)';
+
+      function done(copied) {
+        alert(copied
+          ? 'Your layout JSON copied to clipboard.\n\nPaste it over ' + where
+            + ' to save this table arrangement for other users.' + note
+          : 'Could not copy automatically — copy this JSON and paste it over '
+            + where + ':\n\n' + json + note);
+      }
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(json).then(() => done(true), () => done(false));
+      } else {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = json;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          done(ok);
+        } catch (err) {
+          done(false);
+        }
+      }
+    });
+
+    resetLink.addEventListener('click', e => {
+      e.preventDefault();
+      menu.style.display = 'none';
+      if (!confirm('Clear this browser\'s saved table positions and reload with the file\'s default layout?')) return;
+      try { localStorage.removeItem('industry-schema-positions'); } catch (err) {}
+      location.reload();
+    });
+  }
+  setupSchemaPanelMenu();
 
 })();
 </script>

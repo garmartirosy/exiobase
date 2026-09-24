@@ -2,7 +2,7 @@
 """
 Industry Trade Flow Analysis for Exiobase Data
 Extracts trade flow data based on config settings for imports, exports, or domestic flows
-Outputs trade.csv with columns: year, region1, region2, industry1, industry2, amount
+Outputs trade.csv with columns: trade_id, region1, region2, industry1, industry2, amount
 
 Default (Recommended):
 python trade.py
@@ -19,7 +19,7 @@ Creates 4 files
   - factor.csv - Environmental factor definitions from Exiobase extensions (calls create_factors_csv())
 
   2. Primary Output:
-  - trade.csv - The main trade flow data with columns: trade_id, year, region1, region2, industry1, industry2,
+  - trade.csv - The main trade flow data with columns: trade_id, region1, region2, industry1, industry2,
   amount
 
   3. Trade Factors (your focus):
@@ -32,13 +32,17 @@ import pandas as pd
 import numpy as np
 import pymrio
 import csv
-import time
 from datetime import datetime
 import os
 from pathlib import Path
 import pickle as pkl
 import argparse
 from config_loader import load_config, get_file_path, get_reference_file_path, print_config_summary
+from exiobase_download import ensure_exiobase_file
+from trade_extraction import (
+    aggregate_factors, build_factor_mapping, compute_trade_factor,
+    ensure_industry_mapping, ensure_sector_tables, ensure_factors_export,
+)
 
 class ExiobaseTradeFlow:
     def __init__(self, use_large_factors=False):
@@ -77,289 +81,89 @@ class ExiobaseTradeFlow:
         self.model_path.mkdir(exist_ok=True)
 
         # Ensure the Exiobase zip is downloaded before sector mapping needs it
-        self._ensure_exiobase_file()
+        _, self.year = ensure_exiobase_file(self.model_path, self.year, self.model_type)
 
         # Load or create sector mapping
         self.sector_mapping = self.load_sector_mapping()
-        
+
+        # Create the BEA Sector table + its many-to-many join to industry.csv
+        self.create_sector_tables()
+
         # Create factors export
         self.create_factors_export()
 
     def load_sector_mapping(self):
-        """
-        Load the sector mapping from industry.csv or create it if it doesn't exist
-        """
-        industries_file = get_reference_file_path(self.config, 'industries')
+        """Delegates to trade_extraction.ensure_industry_mapping — shared with trade_comprehensive.py."""
+        return ensure_industry_mapping(self.config)
 
-        if Path(industries_file).exists():
-            print("Loading existing sector mapping from industry.csv")
-            mapping_df = pd.read_csv(industries_file)
-            # Create a mapping dictionary from sector name to 5-char ID
-            return dict(zip(mapping_df['name'], mapping_df['industry_id']))
-        else:
-            print("Creating new sector mapping...")
-            # Run the sector mapping creation
-            from create_sector_mapping import create_sector_mapping
-            mapping_df = create_sector_mapping()
-            if mapping_df is None:
-                print("Warning: Could not create sector mapping (Exiobase zip unavailable). Using empty mapping.")
-                return {}
-            return dict(zip(mapping_df['name'], mapping_df['industry_id']))
+    def create_sector_tables(self):
+        """Delegates to trade_extraction.ensure_sector_tables — shared with trade_comprehensive.py."""
+        ensure_sector_tables(self.config)
 
     def create_factors_export(self):
-        """
-        Create the factor.csv export if it doesn't exist
-        """
-        factors_file = get_reference_file_path(self.config, 'factors')
-        
-        if Path(factors_file).exists():
-            print("factor.csv already exists")
-        else:
-            print("Creating factor.csv from Exiobase extensions...")
-            try:
-                from factors import create_factors_csv
-                create_factors_csv()
-            except Exception as e:
-                print(f"Failed to create factor.csv: {e}")
+        """Delegates to trade_extraction.ensure_factors_export — shared with trade_comprehensive.py."""
+        ensure_factors_export(self.config)
 
-    def _apply_partial_factors_filter(self, F_stacked, ext_name):
+    def _aggregate_factors(self, F_stacked, ext_name):
         """
-        Apply filtering to create smaller trade_factor.csv using selected factors
+        Collapse raw per-stressor coefficients into a small set of aggregated
+        flows for the default trade_factor.csv. Delegates to
+        trade_extraction.aggregate_factors (shared with trade_comprehensive.py
+        — see PLAN-comprehensive.md's "Memory management" section); this
+        method now just adds the progress print.
         """
-        partial_limit = self.config['PROCESSING'].get('partial_factor_limit', 50)
-        F_stacked = F_stacked.copy()
-        F_stacked['_abs_coefficient'] = F_stacked['coefficient'].abs()
-        
-        # Define priority factors for each extension
-        priority_factors = {
-            'air_emissions': ['CO2', 'CH4', 'N2O', 'NOX', 'CO', 'SO2', 'NH3', 'PM10', 'PM2.5'],
-            'employment': ['Employment people', 'Employment hours'],
-            'energy': ['Energy use', 'Electricity', 'Natural gas', 'Oil'],
-            'water': ['Water consumption', 'Water withdrawal'],
-            'land': ['Cropland', 'Forest', 'Pastures', 'Artificial'],
-            'material': ['Metal Ores', 'Non-Metallic Minerals', 'Fossil Fuels', 'Primary Crops']
-        }
-        
-        selected_factors = priority_factors.get(ext_name, [])
-        
-        if selected_factors:
-            # Filter by priority factors first
-            priority_mask = F_stacked['flowable'].str.contains('|'.join(selected_factors), case=False, na=False)
-            priority_data = F_stacked[priority_mask].copy()
-            
-            # If we still have too many, select top ones by coefficient magnitude
-            if len(priority_data) > partial_limit:
-                priority_data = priority_data.nlargest(partial_limit, '_abs_coefficient')
-            
-            # If we have fewer than limit, add other significant factors
-            remaining_limit = partial_limit - len(priority_data)
-            if remaining_limit > 0:
-                other_data = F_stacked[~priority_mask].copy()
-                if len(other_data) > 0:
-                    other_significant = other_data.nlargest(remaining_limit, '_abs_coefficient')
-                    F_stacked = pd.concat([priority_data, other_significant], ignore_index=True)
-                else:
-                    F_stacked = priority_data
-            else:
-                F_stacked = priority_data
-        else:
-            # If no priority factors defined, select by coefficient magnitude
-            F_stacked = F_stacked.nlargest(partial_limit, '_abs_coefficient')
-        
-        F_stacked = F_stacked.drop(columns=['_abs_coefficient'], errors='ignore')
-        print(f"    Selected {len(F_stacked)} factors from {ext_name} (partial factors mode)")
-        return F_stacked
+        result = aggregate_factors(F_stacked, ext_name)
+        print(f"    Aggregated {ext_name} into {len(result)} flow rows (region x industry x flow)")
+        return result
 
     def create_trade_factor(self, trade_df, exio_model):
         """
-        Create trade_factor.csv that links each trade flow to environmental factors
+        Create trade_factor.csv that links each trade flow to environmental
+        factors. The per-extension M-matrix merge itself now lives in
+        trade_extraction.compute_trade_factor (shared with
+        trade_comprehensive.py — see PLAN-comprehensive.md's "Memory
+        management" section); this method keeps the factor-mapping setup,
+        file I/O, and error/fallback handling that are specific to the
+        single-country CSV pipeline.
         """
         print("Creating trade_factor.csv with real Exiobase factor data...")
-        
+
         try:
-            # Load the factors mapping
+            # Load the factors mapping. Prefix-only names like "CO2" are
+            # ambiguous across multiple factors, so build_factor_mapping
+            # keys on the exact stressor name (plus formatting variants).
             factors_file = get_reference_file_path(self.config, 'factors')
             factors_df = pd.read_csv(factors_file)
-            
-            # Create an exact mapping from Exiobase stressor names to factor_ids.
-            # Prefix-only names like "CO2" are ambiguous across multiple factors.
-            factor_mapping = dict(zip(factors_df['stressor'], factors_df['factor_id']))
-            
-            # Add robust mapping for common formatting variations
-            robust_mapping = factor_mapping.copy()
-            for name, factor_id in factor_mapping.items():
-                # Handle PM2_5 vs PM2.5 variations
-                if 'PM2_5' in name:
-                    robust_mapping['PM2.5'] = factor_id
-                elif 'PM2.5' in name:
-                    robust_mapping['PM2_5'] = factor_id
-                # Handle other common variations
-                robust_mapping[name.replace('_', '.')] = factor_id
-                robust_mapping[name.replace('.', '_')] = factor_id
-            
-            factor_mapping = robust_mapping
+            factor_mapping = build_factor_mapping(factors_df)
             print(f"Created factor mapping with {len(factor_mapping)} entries")
-            print(f"Sample mapped factors: {list(factor_mapping.keys())[:10]}")
-            
-            extensions = ['air_emissions', 'employment', 'energy', 'land', 'material', 'water']
-            
-            all_trade_factor = []
-            
-            for ext_name in extensions:
-                if hasattr(exio_model, ext_name):
-                    print(f"Processing {ext_name} factors for trade flows...")
-                    ext = getattr(exio_model, ext_name)
-                    
-                    if hasattr(ext, 'S'):
-                        S_matrix = ext.S
-                        
-                        # Convert S matrix to a lookup format.
-                        # S matrix values are physical intensity per unit output.
-                        F_stacked = S_matrix.stack(level=['region', 'sector'], future_stack=True).reset_index()
-                        F_stacked.columns = ['stressor', 'region', 'sector', 'coefficient']
-                        
-                        # Filter for non-zero coefficients only and sample for performance
-                        F_stacked = F_stacked[F_stacked['coefficient'] != 0].copy()
-                        
-                        # Keep ALL coefficients for comprehensive analysis
-                        print(f"  Found {len(F_stacked)} non-zero {ext_name} intensity coefficients")
-                        
-                        # Map sectors to industry IDs
-                        F_stacked['industry_id'] = F_stacked['sector'].map(self.sector_mapping)
-                        F_stacked = F_stacked.dropna(subset=['industry_id'])
-                        
-                        # Keep exact stressor names for factor_id mapping. The
-                        # flowable field is used only for priority filtering.
-                        F_stacked['flowable'] = F_stacked['stressor'].astype(str)
-                        F_stacked['factor_id'] = F_stacked['stressor'].map(factor_mapping)
-                        F_stacked = F_stacked.dropna(subset=['factor_id'])
-                        
-                        # Employment S coefficients are already in their factor
-                        # units per unit output. No additional unit scaling is
-                        # applied here.
-                        if ext_name == 'employment':
-                            print(f"  Using employment intensity coefficients for {len(F_stacked)} employment factors")
-                            
-                            # Employment people: stressor contains "Employment people:" with "1000 p" units
-                            employment_people_mask = F_stacked['stressor'].str.contains('Employment people:', case=False, na=False)
-                            
-                            # Employment hours: stressor contains "Employment hours:" with "M.hr" units
-                            employment_hours_mask = F_stacked['stressor'].str.contains('Employment hours:', case=False, na=False)
-                            
-                            # For debugging - show what employment factors we're processing
-                            if employment_people_mask.any():
-                                people_count = employment_people_mask.sum()
-                                print(f"    Found {people_count} employment people factors (1000 p units)")
-                                
-                            if employment_hours_mask.any():
-                                hours_count = employment_hours_mask.sum()
-                                print(f"    Found {hours_count} employment hours factors (M.hr units)")
-                        
-                        # Apply partial factors filtering if not using large factors
-                        if not self.use_large_factors and self.config['PROCESSING'].get('use_partial_factors', True):
-                            F_stacked = self._apply_partial_factors_filter(F_stacked, ext_name)
-                        
-                        # Process ALL data with performance optimizations and progress tracking
-                        ext_start_time = time.time()
-                        print(f"  Processing ALL {len(trade_df)} trade flows with {len(F_stacked)} {ext_name} coefficients")
-                        
-                        # Optimize F_stacked for faster merging
-                        F_stacked = F_stacked.set_index(['region', 'industry_id'])
-                        trade_df_indexed = trade_df.set_index(['region1', 'industry1'])
-                        
-                        # Create efficient merge - process in chunks for memory management
-                        chunk_size = 10000
-                        trade_factor_chunks = []
-                        total_chunks = (len(trade_df) + chunk_size - 1) // chunk_size
-                        
-                        for i in range(0, len(trade_df), chunk_size):
-                            chunk_start = time.time()
-                            chunk_df = trade_df.iloc[i:i+chunk_size].copy()
-                            chunk_num = i // chunk_size + 1
-                            
-                            # Efficient merge using index-based joins
-                            trade_factor_chunk = chunk_df.merge(
-                                F_stacked.reset_index(), 
-                                left_on=['region1', 'industry1'], 
-                                right_on=['region', 'industry_id'],
-                                how='inner'
-                            )
-                            
-                            if not trade_factor_chunk.empty:
-                                trade_factor_chunks.append(trade_factor_chunk)
-                            
-                            # Progress report every chunk
-                            chunk_time = time.time() - chunk_start
-                            elapsed_total = time.time() - ext_start_time
-                            print(f"    Chunk {chunk_num}/{total_chunks} completed in {chunk_time:.1f}s | Total: {elapsed_total:.1f}s | Found: {len(trade_factor_chunk) if not trade_factor_chunk.empty else 0} matches")
-                        
-                        # Combine all chunks
-                        if trade_factor_chunks:
-                            trade_factor_merge = pd.concat(trade_factor_chunks, ignore_index=True)
-                            print(f"  Combined {len(trade_factor_chunks)} chunks -> {len(trade_factor_merge)} total matches")
-                        else:
-                            trade_factor_merge = pd.DataFrame()
-                        
-                        if not trade_factor_merge.empty:
-                            # Calculate factor level (physical impact quantity)
-                            trade_factor_merge['level'] = trade_factor_merge['amount'] * trade_factor_merge['coefficient']
 
-                            # Round: 3 decimals for water/air_emissions (small physical quantities), 0 for others
-                            if ext_name in ('water', 'air_emissions'):
-                                trade_factor_merge['level'] = trade_factor_merge['level'].round(3)
-                            else:
-                                trade_factor_merge['level'] = trade_factor_merge['level'].round(0).astype(int)
+            trade_factor_df = compute_trade_factor(
+                trade_df, exio_model, self.sector_mapping, factor_mapping,
+                use_large_factors=self.use_large_factors, log=print,
+            )
 
-                            # Filter for meaningful impacts (keep all meaningful data)
-                            initial_count = len(trade_factor_merge)
-                            trade_factor_merge = trade_factor_merge[abs(trade_factor_merge['level']) > 0.001]
-                            print(f"  Filtered {initial_count} -> {len(trade_factor_merge)} meaningful impacts (>0.001)")
-
-                            # Keep only needed columns and verify factor_id integrity
-                            trade_factor_subset = trade_factor_merge[['trade_id', 'factor_id', 'level']]
-                            
-                            # Check for any remaining NaN values in factor_id
-                            nan_count = trade_factor_subset['factor_id'].isna().sum()
-                            if nan_count > 0:
-                                print(f"  WARNING: Found {nan_count} unmapped factor_ids, removing them")
-                                # Debug: show unmapped stressor names
-                                unmapped_stressors = trade_factor_merge[trade_factor_merge['factor_id'].isna()]['stressor'].unique()
-                                print(f"  Unmapped stressors: {list(unmapped_stressors)[:10]}...")  # Show first 10
-                                trade_factor_subset = trade_factor_subset.dropna(subset=['factor_id'])
-                            
-                            # Convert to int only after removing NaN values
-                            if not trade_factor_subset.empty:
-                                trade_factor_subset['factor_id'] = trade_factor_subset['factor_id'].astype(int)
-                            
-                            all_trade_factor.extend(trade_factor_subset.to_dict('records'))
-            
-            # Create DataFrame and save
-            if all_trade_factor:
-                trade_factor_df = pd.DataFrame(all_trade_factor)
-                
-                # Determine output file based on mode
-                if self.use_large_factors:
-                    output_file = get_file_path(self.config, 'trade_factor')
-                    if not output_file.endswith('_lg.csv'):
-                        output_file = output_file.replace('.csv', '_lg.csv')
-                    file_type = "large"
+            # Determine output file based on mode
+            if self.use_large_factors:
+                output_file = get_file_path(self.config, 'trade_factor')
+                if not output_file.endswith('_lg.csv'):
+                    output_file = output_file.replace('.csv', '_lg.csv')
+                file_type = "large"
+                if not trade_factor_df.empty:
                     print(f"⚠️  WARNING: Creating large trade_factor_lg.csv (~1.5GB) - this may cause memory issues in trade_resource.py")
-                else:
-                    output_file = get_file_path(self.config, 'trade_factor')
-                    if output_file.endswith('_lg.csv'):
-                        output_file = output_file.replace('_lg.csv', '.csv')
-                    file_type = "small"
-                
+            else:
+                output_file = get_file_path(self.config, 'trade_factor')
+                if output_file.endswith('_lg.csv'):
+                    output_file = output_file.replace('_lg.csv', '.csv')
+                file_type = "small"
+
+            if not trade_factor_df.empty:
                 trade_factor_df.to_csv(output_file, index=False)
                 print(f"Created {file_type} trade_factor file with {len(trade_factor_df)} factor-trade relationships")
                 print(f"File: {output_file}")
             else:
                 print("No trade-factor relationships found, creating empty trade_factor.csv")
-                output_file = get_file_path(self.config, 'trade_factor')
-                if output_file.endswith('_lg.csv'):
-                    output_file = output_file.replace('_lg.csv', '.csv')
-                pd.DataFrame(columns=['trade_id', 'factor_id', 'level']).to_csv(output_file, index=False)
-                
+                trade_factor_df.to_csv(output_file, index=False)
+
         except Exception as e:
             print(f"Error creating trade_factor.csv: {e}")
             self.create_trade_factor_fallback(trade_df)
@@ -402,115 +206,16 @@ class ExiobaseTradeFlow:
         except Exception as e:
             print(f"Error creating fallback trade_factor.csv: {e}")
 
-    def _download_direct(self, year):
-        """
-        Direct download from Zenodo using the current API URL format.
-        pymrio's built-in downloader uses a regex that no longer matches Zenodo's URLs
-        (Zenodo changed from /records/ID/files/NAME.zip to
-        /api/records/ID/files/NAME.zip/content), so this method bypasses it.
-        """
-        import requests
-
-        filename = f"IOT_{year}_{self.model_type}.zip"
-        dest = self.model_path / filename
-
-        # Resolve the DOI to get the current Zenodo record ID
-        doi_url = "https://doi.org/10.5281/zenodo.3583070"
-        print(f"Resolving Zenodo DOI to find current record ID...")
-        r = requests.get(doi_url, allow_redirects=True, timeout=30)
-        record_id = r.url.rstrip('/').split('/')[-1]
-        if not record_id.isdigit():
-            raise RuntimeError(f"Could not extract Zenodo record ID from URL: {r.url}")
-
-        download_url = f"https://zenodo.org/api/records/{record_id}/files/{filename}/content"
-        print(f"Downloading {filename} from Zenodo record {record_id}...")
-        print(f"URL: {download_url}")
-        print("(This may take several minutes - file is ~4GB)")
-
-        with requests.get(download_url, stream=True, timeout=3600) as r:
-            r.raise_for_status()
-            total = int(r.headers.get('content-length', 0))
-            downloaded = 0
-            with open(dest, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=1024 * 1024):  # 1 MB chunks
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total:
-                        pct = downloaded / total * 100
-                        print(f"\r  Progress: {pct:.1f}% ({downloaded/1e9:.2f}/{total/1e9:.2f} GB)",
-                              end='', flush=True)
-        print()
-        print(f"Successfully downloaded {filename}")
-        return dest
-
-    def _ensure_exiobase_file(self):
-        """
-        Ensure the Exiobase zip is present, downloading it if needed.
-        Sets self.year to the fallback year if the requested year is unavailable.
-        Returns the Path to the zip, or None if only simulated fallback data can be used.
-        """
-        exio_file = self.model_path / f'IOT_{self.year}_{self.model_type}.zip'
-        if exio_file.exists():
-            print(f"Found existing Exiobase file: {exio_file}")
-            return exio_file
-
-        # Try pymrio downloader first, then fall back to direct download.
-        # pymrio's regex (expecting /records/ID/files/NAME.zip) no longer matches
-        # Zenodo's current URL format (/api/records/ID/files/NAME.zip/content), so
-        # it silently succeeds without downloading anything.
-        try:
-            print(f"Downloading Exiobase {self.year} data via pymrio...")
-            pymrio.download_exiobase3(
-                storage_folder=self.model_path,
-                system=self.model_type,
-                years=[self.year]
-            )
-            if not exio_file.exists():
-                raise RuntimeError(
-                    f"pymrio.download_exiobase3 completed without error but did not create "
-                    f"{exio_file.name}. pymrio's URL regex no longer matches Zenodo's current "
-                    f"API format (/api/records/ID/files/NAME.zip/content). Trying direct download."
-                )
-            print(f"Successfully downloaded Exiobase {self.year} data")
-            return exio_file
-        except Exception as e:
-            print(f"pymrio download issue: {e}")
-
-        # Direct download using current Zenodo API URL format
-        try:
-            self._download_direct(self.year)
-            return exio_file
-        except Exception as direct_e:
-            print(f"Direct download failed for {self.year}: {direct_e}")
-
-        # Only fallback to a prior year that doesn't yet have downloaded data.
-        # If the prior year already has a download, exit to prevent accidental reuse.
-        fallback_year = self.year - 1
-        fallback_file = self.model_path / f'IOT_{fallback_year}_{self.model_type}.zip'
-
-        if fallback_file.exists():
-            print(f"Prior year {fallback_year} already has downloaded data, preventing rerun. Exiting process.")
-            print("Please manually download the requested year or use an available year.")
-            exit(1)
-
-        print(f"Trying to download prior year {fallback_year}...")
-        try:
-            self._download_direct(fallback_year)
-            print(f"Successfully downloaded Exiobase {fallback_year} data")
-            self.year = fallback_year
-            return fallback_file
-        except Exception as fallback_e:
-            print(f"Fallback download failed for {fallback_year}: {fallback_e}")
-            print("Will use simulated fallback data.")
-            return None
-
     def download_and_process_exiobase(self):
         """
         Download (if needed) and parse Exiobase data using pymrio library.
         """
         print(f"Loading Exiobase data for {self.year}...")
 
-        exio_file = self._ensure_exiobase_file()
+        # Shared with exiobase_download.py's standalone --year guide so a
+        # multi-GB download run this way behaves identically either way.
+        exio_file, actual_year = ensure_exiobase_file(self.model_path, self.year, self.model_type)
+        self.year = actual_year
 
         if exio_file is None:
             return self.load_fallback_data()
@@ -611,15 +316,12 @@ class ExiobaseTradeFlow:
             trade_data = trade_data[~rounded_zero_rows].copy()
             print(f"Removed {removed_count} flows that round to 0.00 at 2 decimals")
         
-        # Add year column
-        trade_data['year'] = self.year
-        
         # Add trade_id column (1-based sequential ID)
         trade_data = trade_data.reset_index(drop=True)
         trade_data['trade_id'] = trade_data.index + 1
-        
-        # Reorder columns
-        trade_data = trade_data[['trade_id', 'year', 'region1', 'region2', 'industry1', 'industry2', 'amount']]
+
+        # Reorder columns (no 'year' column — one database per year makes it redundant)
+        trade_data = trade_data[['trade_id', 'region1', 'region2', 'industry1', 'industry2', 'amount']]
         
         return trade_data
 
@@ -686,20 +388,19 @@ class ExiobaseTradeFlow:
                         # Only include significant flows
                         if base_amount > 0.1:
                             data.append({
-                                'year': self.year,
                                 'region1': region1,
                                 'region2': region2,
                                 'industry1': exp_sector,
                                 'industry2': imp_sector,
                                 'amount': round(base_amount, 2)
                             })
-        
+
         df = pd.DataFrame(data)
         # Add trade_id for fallback data
         df['trade_id'] = df.index + 1
-        # Reorder columns
-        df = df[['trade_id', 'year', 'region1', 'region2', 'industry1', 'industry2', 'amount']]
-        
+        # Reorder columns (no 'year' column — one database per year makes it redundant)
+        df = df[['trade_id', 'region1', 'region2', 'industry1', 'industry2', 'amount']]
+
         return df
 
     def process_trade_flows(self):
@@ -707,10 +408,10 @@ class ExiobaseTradeFlow:
         Process and format the trade flow data
         """
         print(f"Processing {self.tradeflow_type} flows for {self.year} with {self.country}...")
-        
+
         # Try to download and process real Exiobase data
         exio_model = self.download_and_process_exiobase()
-        
+
         if isinstance(exio_model, pd.DataFrame):
             # Fallback data was returned
             df = exio_model
@@ -721,28 +422,23 @@ class ExiobaseTradeFlow:
             df = self.extract_m_matrix_data(exio_model)
             # Create trade_factor with real data
             self.create_trade_factor(df, exio_model)
-        
+
         # Sort by amount descending to show largest flows first
         df = df.sort_values('amount', ascending=False)
-        
+
         return df
 
     def export_to_csv(self, df):
         """
         Export the processed data to CSV
         """
+        columns_with_id = ['trade_id', 'region1', 'region2', 'industry1', 'industry2', 'amount']
+        columns_no_id = ['region1', 'region2', 'industry1', 'industry2', 'amount']
+
         print(f"Exporting trade.csv data to {self.output_file}...")
-        
-        # Ensure we have the correct column order including trade_id
-        if 'trade_id' in df.columns:
-            columns = ['trade_id', 'year', 'region1', 'region2', 'industry1', 'industry2', 'amount']
-        else:
-            columns = ['year', 'region1', 'region2', 'industry1', 'industry2', 'amount']
+        columns = columns_with_id if 'trade_id' in df.columns else columns_no_id
         df = df[columns]
-        
-        # Export to CSV
         df.to_csv(self.output_file, index=False, float_format='%.2f')
-        
         return len(df)
 
     def run_analysis(self):
@@ -760,7 +456,7 @@ class ExiobaseTradeFlow:
         try:
             # Process the trade flows
             df = self.process_trade_flows()
-            
+
             # Export to CSV
             total_rows = self.export_to_csv(df)
             

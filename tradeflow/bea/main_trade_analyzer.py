@@ -5,11 +5,16 @@ Provides state-level trade flow disaggregation, economic impact calculations,
 and employment multipliers for comprehensive US trade analysis.
 """
 
+import sys
 import pandas as pd
 import numpy as np
 from pathlib import Path
 import json
 import re
+
+# Allow imports from parent tradeflow directory (exiobase_factors, etc.)
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from exiobase_factors import aggregate_coefficients
 
 class StateTradeAnalyzer:
     def __init__(self, config):
@@ -210,7 +215,12 @@ class StateTradeAnalyzer:
     
     def load_exiobase_satellite(self, exiobase_zip_path):
         """
-        Load Exiobase S matrix (environmental intensity per unit output) for US sectors.
+        Load Exiobase M matrix (total — direct + upstream supply chain, via the
+        Leontief inverse — environmental multiplier per unit output) for US
+        sectors. This matches EPA USEEIO's import_emission_factors methodology
+        (see exiobase_helpers.py in https://github.com/USEPA/USEEIO/tree/master/import_emission_factors),
+        which builds import factors from M, not the direct-only S matrix — S
+        would omit everything embodied in a sector's own inputs.
         Populates self._satellite_data: dict of industry_id -> list of (factor_id, coefficient).
         Factor IDs are assigned by row position across extensions (same as factors.py).
         """
@@ -252,31 +262,50 @@ class StateTradeAnalyzer:
 
         threshold = self.config.get('PROCESSING', {}).get('min_impact_threshold', 0.001)
 
-        satellite_data = {}  # industry_id → list of (factor_id, coefficient), all factors meeting threshold
+        satellite_data = {}      # industry_id → list of (factor_id, coefficient), all raw factors meeting threshold — feeds interstate_factor_lg.csv only
+        satellite_aggregate = {}  # industry_id → list of (factor_id, coefficient), EPA-style aggregated flows — feeds the default interstate_factor.csv (see exiobase_factors.py)
 
         for ext_name in extensions:
             if hasattr(exio_model, ext_name):
                 ext = getattr(exio_model, ext_name)
-                if not hasattr(ext, 'S'):
+                if not hasattr(ext, 'M'):
                     continue
                 try:
-                    us_S = ext.S.xs('US', level='region', axis=1)
+                    # fillna(0): a handful of raw Exiobase cells are NaN
+                    # (typically a 0/0 from a sector with zero output in some
+                    # region) rather than 0. Since M is a global
+                    # Leontief-inverse product, a single NaN anywhere poisons
+                    # that entire stressor's M row for every region — treat
+                    # it as a real "no reported value" before summing raw
+                    # stressors into an aggregated flow, or a single poisoned
+                    # cell silently NaNs out a flow that has real data from
+                    # its other contributing stressors.
+                    us_M = ext.M.xs('US', level='region', axis=1).fillna(0)
                 except KeyError:
                     continue
 
-                for sector in us_S.columns:
+                for sector in us_M.columns:
                     iid = sector_to_iid.get(str(sector))
                     if not iid:
                         continue
                     entries = [
-                        (stressor_to_fid[stressor], float(us_S.loc[stressor, sector]))
-                        for stressor in us_S.index
-                        if stressor in stressor_to_fid and abs(float(us_S.loc[stressor, sector])) >= threshold
+                        (stressor_to_fid[stressor], float(us_M.loc[stressor, sector]))
+                        for stressor in us_M.index
+                        if stressor in stressor_to_fid and abs(float(us_M.loc[stressor, sector])) >= threshold
                     ]
                     if entries:
                         if iid not in satellite_data:
                             satellite_data[iid] = []
                         satellite_data[iid].extend(entries)
+
+                    # Aggregated entries for the default file — every stressor
+                    # in this extension for this sector, not threshold-filtered
+                    # (EPA's own GHG selection doesn't apply a magnitude cutoff
+                    # either; the aggregation itself is the reduction).
+                    stressor_pairs = [(stressor, float(us_M.loc[stressor, sector])) for stressor in us_M.index]
+                    agg_entries = aggregate_coefficients(stressor_pairs, ext_name)
+                    if agg_entries:
+                        satellite_aggregate.setdefault(iid, []).extend(agg_entries)
 
         # Sort each industry's full factor list globally by magnitude (descending).
         # This allows callers to slice [:N] to get the top-N selected factors.
@@ -284,8 +313,21 @@ class StateTradeAnalyzer:
             satellite_data[iid].sort(key=lambda x: abs(x[1]), reverse=True)
 
         self._satellite_data = satellite_data
+        self._satellite_data_aggregate = satellite_aggregate
         print(f"    Satellite data loaded: {len(satellite_data)} US industries with factor coefficients")
         return satellite_data
+
+    def get_satellite_aggregate_entries(self, industry_id):
+        """
+        Return the EPA-style aggregated (factor_id, coefficient) entries for
+        a 5-character industry ID — used by the default interstate_factor.csv
+        instead of a top-N-by-magnitude slice of get_satellite_factor_entries.
+        See exiobase_factors.py.
+        """
+        satellite = getattr(self, '_satellite_data_aggregate', None)
+        if not satellite:
+            return []
+        return satellite.get(str(industry_id), [])
 
     def _make_industry_id(self, sector_str, index, used_ids):
         """Generate 5-char industry ID from sector name (mirrors create_sector_mapping.py logic)."""
@@ -366,13 +408,16 @@ class StateTradeAnalyzer:
 
         industry = industry1_cat
 
-        # First collect all candidate state-pair shares
+        # First collect all candidate state-pair shares. Same-state pairs
+        # (origin == destination) are kept, not skipped: excluding them and
+        # then renormalizing the rest to sum to 1.0 would silently reallocate
+        # genuine intra-state consumption onto cross-state pairs, inflating
+        # them. Keeping same-state pairs in the normalization means the
+        # total across all resulting rows still equals trade.amount, but now
+        # correctly split between real interstate and intrastate flow.
         state_pairs = []
         for origin_state in producing_states:
             for dest_state in consuming_states:
-                if origin_state == dest_state:
-                    continue
-
                 raw_share = self._calculate_state_flow_share(
                     origin_state, dest_state, industry1_cat, industry2_cat, bea_data
                 )
@@ -402,7 +447,7 @@ class StateTradeAnalyzer:
                 'coefficient': 1.0,
                 'state_industry_code': industry,
                 'level': level,
-                'flow_type': 'inter_state',
+                'flow_type': 'intra_state' if origin_state == dest_state else 'inter_state',
                 'employment_impact': 0.0,
                 '_origin_state': origin_state,
                 '_destination_state': dest_state,
@@ -694,8 +739,9 @@ class StateTradeAnalyzer:
         """
         State-level export competitiveness from interstate.csv.
 
-        interstate_df columns: interstate_id, region1 (origin state), region2 (destination state),
-                               industry1, amount (M EUR)
+        interstate_df columns: interstate_id, state1 (origin state), state2 (destination state),
+                               sector1/industry1 (BEA Sector for the primary interstate.csv, raw
+                               Exiobase industry for the full-detail interstate-lg.csv), amount (M EUR)
 
         Metrics per interstate_id:
           state_industry_exports_total : M EUR sent by this state+industry to all destination states
@@ -709,6 +755,10 @@ class StateTradeAnalyzer:
         if interstate_df.empty:
             return pd.DataFrame()
 
+        # interstate.csv (primary) has sector1/2 (BEA Sector level); interstate-lg.csv
+        # (full detail) has industry1/2 (raw Exiobase industry) — see ../PLAN.md.
+        col1 = 'sector1' if 'sector1' in interstate_df.columns else 'industry1'
+
         total = interstate_df['amount'].sum()
 
         def _hhi(amounts):
@@ -718,19 +768,19 @@ class StateTradeAnalyzer:
             s = amounts / t
             return round(float((s ** 2).sum()), 6)
 
-        state_industry_stats = interstate_df.groupby(['region1', 'industry1']).agg(
+        state_industry_stats = interstate_df.groupby(['state1', col1]).agg(
             state_industry_exports_total=('amount', 'sum'),
-            state_destination_count=('region2', 'nunique'),
+            state_destination_count=('state2', 'nunique'),
         )
         state_industry_hhi = (
-            interstate_df.groupby(['region1', 'industry1'])['amount']
+            interstate_df.groupby(['state1', col1])['amount']
             .apply(_hhi)
             .rename('state_export_concentration')
         )
         state_industry_stats = state_industry_stats.join(state_industry_hhi).reset_index()
 
-        result = interstate_df[['interstate_id', 'region1', 'industry1', 'amount']].merge(
-            state_industry_stats, on=['region1', 'industry1']
+        result = interstate_df[['interstate_id', 'state1', col1, 'amount']].merge(
+            state_industry_stats, on=['state1', col1]
         )
         result['state_destination_share'] = (result['amount'] / result['state_industry_exports_total']).round(6)
         result['state_export_intensity'] = (result['state_industry_exports_total'] / total).round(6)
@@ -738,14 +788,14 @@ class StateTradeAnalyzer:
 
         out = result[['interstate_id', 'state_industry_exports_total', 'state_destination_share',
                       'state_export_intensity', 'state_destination_count', 'state_export_concentration']]
-        print(f"      ✅ State export competitiveness: {len(out)} rows, {interstate_df['region1'].nunique()} states")
+        print(f"      ✅ State export competitiveness: {len(out)} rows, {interstate_df['state1'].nunique()} states")
         return out
 
     def analyze_import_dependency(self, interstate_df):
         """
         State-level import dependency from interstate.csv.
 
-        Treats inbound interstate flows (region2 = destination state) as state imports.
+        Treats inbound interstate flows (state2 = destination state) as state imports.
 
         Metrics per interstate_id:
           state_industry_imports_total : M EUR received by this state+industry from all origin states
@@ -759,6 +809,10 @@ class StateTradeAnalyzer:
         if interstate_df.empty:
             return pd.DataFrame()
 
+        # interstate.csv (primary) has sector1/2 (BEA Sector level); interstate-lg.csv
+        # (full detail) has industry1/2 (raw Exiobase industry) — see ../PLAN.md.
+        col2 = 'sector2' if 'sector2' in interstate_df.columns else 'industry2'
+
         total = interstate_df['amount'].sum()
 
         def _hhi(amounts):
@@ -768,19 +822,19 @@ class StateTradeAnalyzer:
             s = amounts / t
             return round(float((s ** 2).sum()), 6)
 
-        state_industry_stats = interstate_df.groupby(['region2', 'industry2']).agg(
+        state_industry_stats = interstate_df.groupby(['state2', col2]).agg(
             state_industry_imports_total=('amount', 'sum'),
-            state_supplier_count=('region1', 'nunique'),
+            state_supplier_count=('state1', 'nunique'),
         )
         state_industry_hhi = (
-            interstate_df.groupby(['region2', 'industry2'])['amount']
+            interstate_df.groupby(['state2', col2])['amount']
             .apply(_hhi)
             .rename('state_import_concentration')
         )
         state_industry_stats = state_industry_stats.join(state_industry_hhi).reset_index()
 
-        result = interstate_df[['interstate_id', 'region2', 'industry2', 'amount']].merge(
-            state_industry_stats, on=['region2', 'industry2']
+        result = interstate_df[['interstate_id', 'state2', col2, 'amount']].merge(
+            state_industry_stats, on=['state2', col2]
         )
         result['state_source_share'] = (result['amount'] / result['state_industry_imports_total']).round(6)
         result['state_import_intensity'] = (result['state_industry_imports_total'] / total).round(6)
@@ -788,7 +842,7 @@ class StateTradeAnalyzer:
 
         out = result[['interstate_id', 'state_industry_imports_total', 'state_source_share',
                       'state_import_intensity', 'state_supplier_count', 'state_import_concentration']]
-        print(f"      ✅ State import dependency: {len(out)} rows, {interstate_df['region2'].nunique()} states")
+        print(f"      ✅ State import dependency: {len(out)} rows, {interstate_df['state2'].nunique()} states")
         return out
     
     def create_state_reference_data(self, output_path):
