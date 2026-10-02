@@ -435,8 +435,8 @@ def main():
                 sys.exit(
                     "BEA_API_KEY not found, but --interstate US was requested.\n"
                     "main.py doesn't use the key itself, but bea/main.py will need it after trade\n"
-                    "processing finishes — add BEA_API_KEY=your_key to webroot/docker/.env or\n"
-                    "webroot/.env before starting this run, so a missing key fails now instead of\n"
+                    "processing finishes — add BEA_API_KEY=your_key to the .env set by\n"
+                    "webroot/automation/paths.yaml (or webroot/.env) before starting this run, so a missing key fails now instead of\n"
                     "after a long trade-data run.\n"
                     "Register at https://apps.bea.gov/api/signup/"
                 )

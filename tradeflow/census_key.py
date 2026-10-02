@@ -64,7 +64,7 @@ def find_census_api_key(provided_key=None, start_dir=None):
     """
     Resolve CENSUS_API_KEY from, in order: a provided value, a local
     cloud-repo .env, webroot/automation/paths.yaml's env_file: target,
-    webroot/docker/.env, webroot/.env, then the system environment. Returns
+    webroot/.env, then the system environment. Returns
     the key string, or None if not found anywhere.
     """
     if provided_key:
@@ -93,7 +93,6 @@ def find_census_api_key(provided_key=None, start_dir=None):
                 return env_key
 
     search_paths = [
-        webroot / 'docker' / '.env',
         webroot / '.env',
     ]
     for env_path in search_paths:

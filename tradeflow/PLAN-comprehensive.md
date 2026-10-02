@@ -123,7 +123,7 @@ sizes (416–779MB) informed the admin panel's size cutoff above, extrapolated p
 49-region push to measure directly.
 
 **Not yet done:** an actual live comprehensive run (needs `EXIOBASE_PROVISION_*` credentials, now
-added to `docker/.env`, so `industrydb_2018` can actually be created — and writes real production
+added to the `.env` set by `automation/paths.yaml`, so `industrydb_2018` can actually be created — and writes real production
 rows either way, a deliberate, confirmable step behind `trade_comprehensive.py`'s own terminal
 prompt, not something to run silently) and downloading the 2018 Exiobase file itself (not present
 in `exiobase_data/` yet). See "Rollout: 2018" below for that sequence.
@@ -460,7 +460,7 @@ change from the plan's original assumption (below): a from-scratch per-year data
 existing rows for any other year to collide with, so `trade`/`trade_factor` don't need a `year`
 column at all there — `trade_id INTEGER PRIMARY KEY` alone, `country` defaulting to the exporter.
 Creating a new database needs `EXIOBASE_PROVISION_*` credentials (separate from the regular
-`EXIOBASE_USER`, which lacks `CREATEDB`) — set in `docker/.env` alongside the regular `EXIOBASE_*`
+`EXIOBASE_USER`, which lacks `CREATEDB`) — set in the `.env` set by `automation/paths.yaml` alongside the regular `EXIOBASE_*`
 vars.
 
 **Alternative target: the shared, multi-year `industrydb`** (`COMPREHENSIVE.target: industrydb` /
