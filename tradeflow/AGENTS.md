@@ -1,6 +1,6 @@
 # Annual trade data processing
 
-The following provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+The following provides guidance to our AI Agents when working with code in this repository.
 
 ## Project Overview
 
@@ -57,6 +57,24 @@ python3 bea/main.py
 # Process multiple countries automatically
 python main.py
 
+# Override YEAR/TRADEFLOW/COUNTRY.list without editing config.yaml — safe
+# to run alongside another process using the same config.yaml. YEAR accepts
+# a comma-separated list (e.g. "2019,2021"), looping each year in turn.
+EXIOBASE_YEAR=2019,2021 EXIOBASE_COUNTRY_LIST=default python main.py
+
+# Also persist the resolved settings back to config.yaml, once, before
+# any processing starts
+python main.py --saveconfig
+
+# Also run bea/main.py (interstate/BEA data) right after each year's trade
+# data finishes — checks BEA_API_KEY exists before starting anything
+python main.py --interstate US
+
+# Comma-separated list runs more than one — also runs india/main.py after
+# each year's trade data; a space after the comma is optional. Checks each
+# country's prerequisite (BEA_API_KEY for US, India_data/ dir for IN) first.
+python main.py --interstate US,IN
+
 # Update current country manually
 python update_current_country.py CN
 ```
@@ -65,21 +83,42 @@ python update_current_country.py CN
 
 The scripts are run in this specific order to ensure proper data dependencies:
 
-main.py will first download the Exiobase year file. Takes about 10 minutes for a 535 MB file.  
-The raw Exiobase year file will be placed in exiobase/tradeflow/exiobase_data. (Omitted from deployment by .gitignore)  
+### 0. **exiobase_download.py** - Guided Exiobase Year File Download
+
+Run this first, on its own, before `main.py` or `trade.py`:
+
+```bash
+python3 exiobase_download.py # uses YEARs from config.yaml
+python3 exiobase_download.py --year 2023
+```
+
+`trade.py` calls the same `ensure_exiobase_file()` automatically and silently
+as part of its own run, but a multi-GB download with no visible starting
+point is easy to mistake for a hang — running this script by itself first
+makes the download an explicit, visible step with progress reporting.
+
+It checks `exiobase_data/IOT_{year}_pxp.zip` first and does nothing if that
+file already exists. Otherwise it downloads Exiobase v3 (product-by-product,
+roughly 0.2-4 GB, depending on year) from Zenodo (https://doi.org/10.5281/zenodo.3583070), trying
+`pymrio.download_exiobase3()` first, then falling back to a direct Zenodo API
+download (pymrio's URL regex no longer matches Zenodo's current API format),
+then falling back to the prior year if the requested year isn't published yet
+and no download for that prior year already exists locally. The file lands in
+`exiobase/tradeflow/exiobase_data/` (gitignored — never deployed).
 
 ### 1. **trade.py** - Primary Data Extraction and Processing
 - **Input**: Exiobase Z-matrix (inter-industry flows) and F-matrices (environmental extensions)
 - **Output**: 
-  - `trade.csv` - Core trade flows (trade_id, year, region1, region2, industry1, industry2, amount)
-  - `industry.csv` - Industry sector mapping with 5-character codes
+  - `trade.csv` - Core trade flows, full Exiobase industry detail (trade_id, region1, region2, industry1, industry2, amount) — no `year` column; one database per year makes it redundant. Never had a separate Sector-level primary tier — trade/trade_factor were never the file-size problem (see [PLAN.md](https://github.com/ModelEarth/exiobase/blob/main/tradeflow/PLAN.md)'s revision note).
+  - `industry.csv` - Raw Exiobase industry mapping with 5-character codes (~200 rows)
+  - `sector.csv` / `sector_industry.csv` - BEA Sector classification (~21 categories) and its many-to-many join to `industry.csv`, used by `interstate.csv`'s Sector-level aggregation — see [PLAN.md](https://github.com/ModelEarth/exiobase/blob/main/tradeflow/PLAN.md)
   - `factor.csv` - Environmental factor definitions (721 factors)
-  - `trade_factor.csv` - Environmental coefficients (120 selected factors for imports/exports)
+  - `trade_factor.csv` - Environmental coefficients (aggregated flows — ~10 per industry, not a top-N slice; see below)
   - `trade_factor_lg.csv` - All environmental coefficients (721 factors for domestic flows)
 - **Purpose**: Primary script that extracts trade flows and creates environmental impact coefficients
 - **Key Features**: 
   - Handles imports, exports, and domestic flows based on config
-  - Creates both small (120 factors) and large (721 factors) coefficient files
+  - Creates both small (aggregated flows) and large (721 raw factors) coefficient files
   - For domestic flows, extracts intra-country flows (country→same country)
 - **Processing time**: \~2-3 minutes per country
 
@@ -132,7 +171,7 @@ python trade_resource.py
 
 ### File Selection Logic
 - **Domestic flows**: Automatically uses `trade_factor_lg.csv` (all 721 factors) if available
-- **Import/Export flows**: Uses `trade_factor.csv` (120 selected factors) for performance
+- **Import/Export flows**: Uses `trade_factor.csv` (aggregated flows, ~10 per industry) for performance
 - **Smart fallback**: If `_lg` version doesn't exist, falls back to standard version
 
 ## Data Processing Patterns
@@ -146,15 +185,27 @@ python trade_resource.py
 
 The project uses a dual-file approach to balance comprehensive environmental coverage with processing performance:
 
-#### **trade_factor.csv** (Small File - 120 Selected Factors)
+#### **trade_factor.csv** (Small File - Aggregated Flows)
 - **Used for**: Imports and Exports (international trade flows)
 - **Size**: ~50MB, manageable for all processing scripts
-- **Factor Selection**: Prioritized environmental impacts (CO2, CH4, N2O, employment, energy, water, etc.)
-- **Rationale**: International trade volumes are massive - using all 721 factors would create files >1.5GB
+- **Factor Selection**: Not a top-N-by-magnitude slice — raw stressors are aggregated (summed) into a small,
+  fixed set of flows per industry, mirroring EPA USEEIO's own `import_emission_factors` methodology:
+  5 curated GHG flows for `air_emissions` (Carbon dioxide, Methane, Nitrous oxide, Sulfur hexafluoride,
+  HFCs and PFCs unspecified — EPA's own mapping, copied verbatim), plus one flow per other
+  extension (employment, energy, land, material, water) scoped to match the corresponding USEEIO
+  indicator's coverage (see `exiobase_factors.py`'s `EXTENSION_STRESSOR_PREFIXES`). Up to 10 rows
+  per industry rather than up to 120/721.
+- **Rationale**: International trade volumes are massive - using all 721 raw factors would create files >1.5GB;
+  aggregating to a small flow set also matches EPA's published import-factor product for GHGs.
 - **Performance**: Fast processing, no memory issues
-- **Coverage**: Captures key environmental impacts while maintaining system performance
+- **Coverage**: GHG-complete for air_emissions; the other five extensions are single scoped flows matching
+  USEEIO indicator coverage (Jobs Supported, Energy Use, Land Use, Minerals and Metals Use, Water Use), but
+  computed from Exiobase, not USEEIO's own government-inventory sources. These five won't numerically match
+  either the older EPA repo's or cornerstone-data's published values — USEEIO computes them from separate US
+  government data (BLS for jobs, EIA for energy, USDA for land, USGS for water and minerals), not from
+  Exiobase — so this is a scope match only, not a value match. See `bea/README.md`'s "Beyond GHGs" section.
 
-#### **trade_factor_lg.csv** (Large File - All 721 Factors) 
+#### **trade_factor_lg.csv** (Large File - All 721 raw, unaggregated Factors) 
 - **Used for**: Domestic flows (intra-country trade only)
 - **Size**: ~1.5GB when created with `-lag` flag in trade.py
 - **Factor Coverage**: Complete environmental analysis (all extensions: air, water, land, materials, employment, energy)
@@ -191,11 +242,11 @@ The project uses a dual-file approach to balance comprehensive environmental cov
 ## Output Files Structure
 
 ### Core Trade Data
-- **trade.csv**: `trade_id, year, region1, region2, industry1, industry2, amount`
+- **trade.csv**: `trade_id, region1, region2, industry1, industry2, amount` (full Exiobase industry detail) — no `year` column; one database per year makes it redundant.
 
 ### Environmental Impact Data  
-- **trade_factor.csv**: Selected factors for imports/exports (120 factors)
-- **trade_factor_lg.csv**: All factors for domestic flows (721 factors)
+- **trade_factor.csv**: Aggregated flows for imports/exports (see EPA import factor reduction in bea/README.md)
+- **trade_factor_lg.csv**: All raw, unaggregated factors for domestic flows (721 factors)
 - **trade_impact.csv**: Comprehensive impact summary per trade transaction
 - **trade_employment.csv**: Employment impact analysis
 - **trade_resource.csv**: Resource use analysis (water, energy, land)
@@ -216,7 +267,7 @@ The project uses a dual-file approach to balance comprehensive environmental cov
 ## Performance Optimizations
 
 - **Domestic flows**: All 721 factors (comprehensive analysis feasible)
-- **International flows**: 120 selected factors (performance-optimized)
+- **International flows**: aggregated flows, ~10 per industry (performance-optimized)
 - **Smart file selection**: Automatic `_lg` vs standard file detection
 - **Batch processing**: Multi-level timeout protection with automatic progression
 - **Memory management**: Chunked processing for large datasets
@@ -251,21 +302,24 @@ The system implements a three-tier timeout hierarchy for robust processing manag
 ### Purpose
 Extends the core Exiobase trade data with US Bureau of Economic Analysis API data to produce
 state-level domestic trade flows (`interstate.csv`, `interstate_factor.csv`) and supplementary
-BEA-enhanced tables. Also loads the Exiobase satellite S matrix to add `factor_id` and
-`coefficient` columns to `interstate_factor.csv`.
+BEA-enhanced tables. Also loads the Exiobase satellite M matrix (total — direct + upstream supply chain, via the
+Leontief inverse) to add `factor_id` to `interstate_factor.csv`. Using M rather than the
+direct-only S matrix matches EPA USEEIO's [import_emission_factors](https://github.com/USEPA/USEEIO/tree/master/import_emission_factors)
+methodology — S alone would omit everything embodied in a sector's own inputs.
 
 ### Prerequisites (must exist before running)
 - `exiobase_data/IOT_{year}_pxp.zip` — Exiobase download (generated by `main.py` or `trade.py`)
 - `../../trade-data/year/{year}/US/domestic/trade.csv` — generated by `trade.py` for domestic flow
 - `../../trade-data/year/{year}/US/imports/trade.csv` — generated by `trade.py` for imports flow
 - `../../trade-data/year/{year}/US/exports/trade.csv` — generated by `trade.py` for exports flow
-- `webroot/.env` containing `BEA_API_KEY=your_key` (register at https://apps.bea.gov/api/signup/)
+- `BEA_API_KEY=your_key` (register at https://apps.bea.gov/api/signup/) in a local environment file if present, else `webroot/docker/.env` or `webroot/.env`
+- `trade-data/concordance/*.csv` — fetched automatically from [ModelEarth/trade-data](https://github.com/ModelEarth/trade-data/tree/main/concordance) if not already present locally; the run stops with a clear message if a needed file isn't found there either
 
 If the `trade.csv` files don't exist yet, pass `--force-regen` to generate them inline.
 
 ### Run command (from `exiobase/tradeflow/`)
 ```bash
-# Uses BEA_API_KEY from webroot/.env
+# Uses BEA_API_KEY from a local environment file if present, else webroot/docker/.env or webroot/.env
 ~/env/bin/python3 bea/main.py
 
 # Force regeneration of trade.csv base files
@@ -278,19 +332,59 @@ If the `trade.csv` files don't exist yet, pass `--force-regen` to generate them 
 **Working directory**: Always run from `exiobase/tradeflow/` (not from `bea/`).
 CWD doesn't affect file resolution (all paths use `Path(__file__)`), but it is the established convention.
 
+**Combined with trade processing**: `main.py --interstate US` runs this automatically, once per
+year, right after that year's trade data finishes — no separate command needed (`--interstate` also
+accepts a comma-separated list, e.g. `--interstate US,IN`, to combine with [india/main.py](india)
+in the same run). The key lookup (`_load_bea_api_key`) delegates to the shared
+`bea_key.find_bea_api_key()`, which `main.py` also calls upfront when `US` is in `--interstate`,
+so a missing key is caught before any trade processing starts rather than after.
+
 ### Key outputs
 - `year/{year}/US/domestic/interstate.csv`
-- `year/{year}/US/domestic/interstate_factor.csv` — includes `factor_id` + `coefficient` from Exiobase S matrix
+- `year/{year}/US/domestic/interstate_factor.csv` — includes `factor_id` from Exiobase's M matrix (total multipliers); `coefficient` is not stored (derivable as `level / interstate.amount`)
 - `year/{year}/US/domestic/state_industry_impacts.csv`
 - `year/{year}/US/bea-report.md`
 
 ### factor_id in interstate_factor.csv
-The S matrix (environmental intensity per unit output) is loaded directly from the Exiobase zip
-via pymrio — no intermediate CSVs are read. Factor IDs are assigned by row position across
-extensions in order: `air_emissions`, `employment`, `energy`, `land`, `material`, `water`
-(same 1-based ordering as `factor.csv`). Rows are filtered by `min_impact_threshold` and
-capped at `partial_factor_limit` (both from `config.yaml PROCESSING`). If the zip is
-unavailable, the file falls back to one aggregate row per state-pair with no `factor_id`.
+The M matrix (total environmental multiplier per unit output — direct plus everything embodied
+in a sector's own inputs, via the Leontief inverse) is loaded directly from the Exiobase zip
+via pymrio — no intermediate CSVs are read. The default file uses the fixed aggregate factor_ids
+(901-910, see exiobase_factors.py) rather than raw per-stressor factor_ids: `air_emissions`
+collapses to EPA's own 5-flow GHG list, the other five extensions each collapse to a single
+flow scoped to match the corresponding USEEIO indicator's coverage. `interstate_factor_lg.csv` (when `use_partial_factors_interstate: false`)
+instead uses every raw per-stressor factor_id (1-721, assigned by row position across extensions
+in order: `air_emissions`, `employment`, `energy`, `land`, `material`, `water`, same ordering as
+`factor.csv`), filtered by `min_impact_threshold` only, no top-N cap. If the zip is unavailable,
+the file falls back to one aggregate row per state-pair with no `factor_id`.
+
+## India State-Level Pipeline (`india/main.py`)
+
+### Purpose
+Disaggregates national Indian economic/trade data down to states and union territories (GSDP ×
+GSVA sector shares, TradeStat exports/imports, SUT-derived A-matrices), matching Indian activity
+labels to Exiobase `industry_id` via `india_us_exiobase_crosswalk.csv` — the same taxonomy used in
+US `trade-data` outputs. Full detail in [india/README.md](india).
+
+### Prerequisites (must exist before running)
+- `exiobase/India_data/` (two levels up from `tradeflow/`) — GSDP, GSVA, SUT, and TradeStat export/import source files; the script scans and categorizes them by filename automatically
+
+### Run command (from `exiobase/tradeflow/`)
+```bash
+python india/main.py
+python india/main.py --year 2019
+```
+
+**Combined with trade processing**: `main.py --interstate IN` (or `--interstate US,IN` to combine
+with the BEA pipeline) runs this automatically, once per year, right after that year's trade data
+finishes. `main.py` checks that `exiobase/India_data/` exists upfront when `IN` is in
+`--interstate`, so a missing directory is caught before any trade processing starts.
+
+### Key outputs
+- `year/{year}/IN/domestic/state_sector_output.csv`
+- `year/{year}/IN/domestic/state_product_export.csv`
+- `year/{year}/IN/domestic/state_product_import.csv`
+- `year/{year}/IN/domestic/india_states.csv`
+- `year/{year}/IN/domestic/allocation_report.md`
 
 ---
 

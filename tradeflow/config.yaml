@@ -1,10 +1,36 @@
 NOTES:
-  1: COUNTRY.list "default" = run only incomplete ones within these 12 AU, BR, CA, CN, DE, FR, GB, IN, IT, JP, KR, US
-  2: COUNTRY.list "all" = run all (could take hours)
+  1: COUNTRY.list "default" = run only incomplete ones within AU, BR, CA,
+    CN, DE, FR, GB, IN, IT, JP, KR, RU, WM, US
+  2: COUNTRY.list "all" = run the standard per-country pipeline (with
+    per-country trade_id blocks) for every country folder already present
+    under year/[year] (falling back to the default 14 if none exist yet).
+    Unlike "comprehensive" below, this processes one country at a time and
+    never extracts all 49 Exiobase regions in a single pass.
+  3: COUNTRY.list "comprehensive" = extracts all 49 Exiobase country/regions
+    in one continuous-numbering pass. No per-country trade_id blocks. How
+    many of those 49 actually get pushed to Azure / written locally depends
+    on COMPREHENSIVE.folders (note 4 below) — it is NOT always all 49.
+  4: Set COMPREHENSIVE.folders (or its short alias SCOPE) to "default" to
+    limit BOTH local .csv output and the Azure push itself to just the 14
+    default-list countries -- this is what our standard comprehensive
+    command uses (starting with the 2024 run; 2018 used "all", pushing and
+    writing every region). trade_id still counts every one of
+    the 49 regions in Exiobase's own row order, so a skipped region just
+    leaves a gap in the numbering rather than shifting later regions' ids.
+    Imports for an in-scope country are assembled from this run's own
+    in-memory extraction, not pulled from Azure -- so they're complete
+    (covering all 49 possible exporters) even when most of them were never
+    pushed themselves.
+  5: COMPREHENSIVE.target picks the Azure database — "year_db" (default) 
+    Set to "industrydb" to instead push to the shared multi-year database, with year as a real column on trade/trade_factor
+    If multiple comma-separated YEAR datasets are listed, the year must match the YEAR list.
 TRADEFLOW: domestic,imports,exports
-YEAR: 2019
+YEAR: 2021
 COUNTRY:
   list: US
+COMPREHENSIVE:
+  folders: all
+  target: year_db
 NODES:
   exiobase:
     source_python: main.py
@@ -26,7 +52,8 @@ NODES:
     order: 45
     parent_node: exiobase
     name: US BEA Trade Flow
-    description: Runs exiobase US-BEA tradeflow integration and writes US trade-data outputs.
+    description: Runs exiobase US-BEA tradeflow integration and writes US trade-data
+      outputs.
     link: exiobase/tradeflow
     python_cmds: python us-bea.py
     output_path: ../../../trade-data/year/[year]/US/
@@ -42,13 +69,14 @@ NODES:
     order: 46
     parent_node: exiobase
     name: India State Allocation
-    description: Disaggregates India national statistics to states/UTs and maps Indian GSVA
-      activity text and HS products to Exiobase industry_id codes shared with US trade-data
-      outputs.
+    description: Disaggregates India national statistics to states/UTs and maps Indian
+      GSVA activity text and HS products to Exiobase industry_id codes shared with
+      US trade-data outputs.
     link: exiobase/tradeflow/india
     python_cmds: python india/main.py
     output_path: ../../../trade-data/year/[year]/IN/domestic/
-    output_info: India state matrices; india_us_exiobase crosswalk; aligns industry_id with US MRIO
+    output_info: India state matrices; india_us_exiobase crosswalk; aligns industry_id
+      with US MRIO
     folder_size: unknown
     dependencies: '{detected_dependencies}'
     data_sources: India MOSPI GSDP/GSVA, TradeStat HS, India SUT, HS_EXIOBASE_mapping
@@ -61,6 +89,8 @@ FOLDERS:
 FILES:
   factors: factor.csv
   industries: industry.csv
+  sectors: sector.csv
+  sector_industry: sector_industry.csv
   industryflow: trade.csv
   trade_factor: trade_factor.csv
   trade_factor_domestic: trade_factor_lg.csv
@@ -73,9 +103,4 @@ FILES:
 PROCESSING:
   sample_size: 1000
   min_impact_threshold: 0.001
-  use_partial_factors: true
-  partial_factor_limit: 120
-  use_partial_factors_domestic: false
-  partial_factor_limit_domestic: 2000
-  partial_factor_limit_interstate: 5
   use_partial_factors_interstate: true
