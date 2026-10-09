@@ -37,8 +37,8 @@ CENSUS_API_KEY_MISSING_NOTICE = (
     "\nNo CENSUS_API_KEY found.\n"
     "Register (free, instant) at https://api.census.gov/data/key_signup.html\n"
     "then add CENSUS_API_KEY=your_key to your .env file (see\n"
-    "webroot/automation/paths.yaml for its location, or webroot/docker/.env\n"
-    "/ webroot/.env as a fallback).\n"
+    "webroot/automation/paths.yaml for its location, or webroot/.env\n"
+    "as a fallback).\n"
     "Unlike a missing BEA_API_KEY, nothing degrades gracefully here -- every\n"
     "request returns 0 rows without a key, so census_imports.py has nothing\n"
     "to compute import shares from.\n" +

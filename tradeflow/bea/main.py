@@ -8,7 +8,7 @@ Now includes file existence checking to avoid regenerating existing trade.csv fi
 Usage:
     python bea/main.py --bea-key YOUR_API_KEY
     python bea/main.py  # Uses BEA_API_KEY from the .env file automation/paths.yaml points at
-                        # (falls back to webroot/docker/.env, webroot/.env). If none is found
+                        # (falls back to webroot/.env). If none is found
                         # and this is an interactive terminal, prompts for one; otherwise
                         # continues with degraded columns -- see bea_key.py and
                         # BEA_API_KEY_MISSING_NOTICE below for exactly what's affected.
@@ -50,7 +50,7 @@ BEA_API_KEY_MISSING_NOTICE = (
     "\nNo BEA_API_KEY found.\n"
     "Register at https://apps.bea.gov/api/signup/ then add it to your .env\n"
     "file (see webroot/automation/paths.yaml for its location, or\n"
-    "webroot/docker/.env / webroot/.env as a fallback), or pass --bea-key.\n\n"
+    "webroot/.env as a fallback), or pass --bea-key.\n\n"
     "What still works without it: commodity_code/industry_code for domestic\n"
     "(interstate.csv) rows -- those come from local concordance files, not\n"
     "the BEA API -- as long as --use-bea-placeholder is also passed.\n"
@@ -114,7 +114,7 @@ class USBEATradeFlow:
     def _load_bea_api_key(self, provided_key):
         """Load BEA API key via the shared bea_key lookup (command line,
         local cloud-repo env, webroot/automation/paths.yaml's env_file:
-        target, webroot/docker/.env, webroot/.env, or system environment).
+        target, webroot/.env, or system environment).
 
         Does NOT exit when the key is missing -- commodity_code/industry_code
         for domestic/interstate rows come from local concordance files (see
